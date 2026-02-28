@@ -58,8 +58,8 @@ docker compose build
 if [ ! -f index.php ]; then
     echo -e "${GREEN}Initializing WordPress project...${NC}"
     
-    # Download WordPress
-    docker compose run --rm php sh -c "curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar && chmod +x wp-cli.phar && ./wp-cli.phar core download --allow-root"
+    # Download WordPress with increased memory limit
+    docker compose run --rm php sh -c "curl -sO https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar && chmod +x wp-cli.phar && php -d memory_limit=512M ./wp-cli.phar core download --allow-root"
     
     echo -e "${GREEN}Fixing project ownership...${NC}"
     sudo chown -R $(whoami):$(id -gn) .

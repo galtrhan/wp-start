@@ -30,4 +30,8 @@ RUN git config --global --add safe.directory /var/www/html
 
 WORKDIR /var/www/html
 
+# Use the default production configuration and increase memory limit
+RUN mv "$PHP_INI_DIR/php.ini-development" "$PHP_INI_DIR/php.ini" && \
+    sed -i 's/memory_limit = 128M/memory_limit = 512M/g' "$PHP_INI_DIR/php.ini"
+
 CMD ["php-fpm"]

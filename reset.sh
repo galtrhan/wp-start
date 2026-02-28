@@ -46,7 +46,7 @@ if [[ $confirm == [yY] || $confirm == [yY][eE][sS] ]]; then
     # 3. Remove runtime files
     echo -e "${GREEN}Removing project files and certificates...${NC}"
     # Remove WordPress core files and directories
-    sudo rm -rf .env certs/ wp-admin/ wp-content/ wp-includes/ wp-config.php index.php license.txt readme.html wp-activate.php wp-blog-header.php wp-comments-post.php wp-cron.php wp-links-opml.php wp-load.php wp-login.php wp-mail.php wp-settings.php wp-signup.php wp-trackback.php xmlrpc.php composer.json composer.lock vendor/ .git/
+    sudo rm -rf .env certs/ wp-admin/ wp-content/ wp-includes/ wp-config.php index.php license.txt readme.html wp-activate.php wp-blog-header.php wp-comments-post.php wp-cron.php wp-links-opml.php wp-load.php wp-login.php wp-mail.php wp-settings.php wp-signup.php wp-trackback.php xmlrpc.php composer.json composer.lock vendor/
     
     echo -e ""
     echo -e "${GREEN}Note: Project-specific certificates have been removed.${NC}"
