@@ -1,0 +1,48 @@
+name: ${COMPOSE_PROJECT_NAME}
+
+services:
+
+  mysql:
+    container_name: ${PROJECT_NAME}_mysql
+    image: mysql:8.0
+    environment:
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_RANDOM_ROOT_PASSWORD: 'yes'
+    volumes:
+      - mysql_data:/var/lib/mysql
+    restart: unless-stopped
+
+  php:
+    container_name: ${PROJECT_NAME}_php
+    build: .
+    volumes:
+      - ./:/var/www/html
+    environment:
+      DB_HOST: ${DB_HOST}
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+    depends_on:
+      - mysql
+    restart: unless-stopped
+
+  nginx:
+    container_name: ${PROJECT_NAME}_nginx
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./:/var/www/html
+      - ./nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./certs:/etc/nginx/certs:ro
+    environment:
+      - PROJECT_NAME=${PROJECT_NAME}
+    depends_on:
+      - php
+    restart: unless-stopped
+
+volumes:
+  mysql_data:

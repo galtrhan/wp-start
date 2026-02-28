@@ -1,0 +1,22 @@
+# PHP/Composer
+/vendor/
+/composer.lock
+
+# Drupal
+/web/sites/*/settings.php
+/web/sites/*/settings.local.php
+/web/sites/*/services.yml
+/web/sites/*/services.local.yml
+/web/sites/*/files/
+/web/core/
+
+# Docker/Environment
+.env
+/certs/
+
+# OS/IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.bak
