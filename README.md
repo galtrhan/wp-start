@@ -75,40 +75,25 @@ Your site will then be available at: `https://wordpress.local`
 - **Port Conflicts**: If ports 80 or 443 are already in use, the `site.sh` script will notify you.
 - **Permissions**: The setup scripts attempt to handle ownership issues, but ensure you run them as your regular user (not with `sudo`).
 
+## Technical Summary
+This is a Docker-based boilerplate for local WordPress development using Nginx, PHP 8.3-FPM, and MySQL 8.0. It includes Bash scripts to automate local SSL certificate generation (via `mkcert`), host entry management, and WordPress core initialization.
+
 ## Common Tasks
 
 ### Shell Access
 To enter the PHP container and run commands directly:
 ```bash
-docker exec -it ${PROJECT_NAME}_php bash
-```
-*(Alternatively, you can use `docker compose exec php bash`)*
-
-### Using Drush
-Drush is installed as a Composer dependency. You can run it easily using the helper script:
-```bash
-./drush.sh [command]
-```
-Example: Clear all caches:
-```bash
-./drush.sh cr
+docker compose exec php bash
 ```
 
-### Using Composer
-Install new modules or dependencies:
+### Running WP-CLI
+WP-CLI can be run inside the PHP container. Example to check core version:
 ```bash
-docker compose exec php composer require drupal/[module_name]
+docker compose exec php ./wp-cli.phar core version --allow-root
 ```
 
-### Database Management
-To enter the PostgreSQL shell:
+### Database Access
+To enter the MySQL shell directly:
 ```bash
-docker compose exec postgres psql -U drupal_user -d drupal_db
+docker compose exec mysql mysql -u ${DB_USER} -p${DB_PASSWORD} ${DB_NAME}
 ```
-
-## Project Structure
-- `web/`: Drupal root (index.php, themes, modules).
-- `vendor/`: Composer-managed dependencies and Drush.
-- `nginx.conf.template`: Template for Nginx server configuration.
-- `Dockerfile`: Custom PHP image definition.
-- `docker-compose.yml`: Service orchestration.
