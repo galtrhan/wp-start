@@ -23,7 +23,7 @@ A Docker-based local development environment for WordPress with Nginx, PHP-FPM, 
 Clone the repository and run the setup script:
 
 ```bash
-./setup.sh
+./site setup
 ```
 
 The script will:
@@ -38,7 +38,7 @@ The script will:
 To start the containers and set up the local domain and certificates:
 
 ```bash
-./site.sh start
+./site start
 ```
 
 This will:
@@ -50,10 +50,11 @@ Your site will then be available at: `https://wordpress.local`
 
 ### 3. Management Scripts
 
-- `./site.sh start`: Start the environment.
-- `./site.sh stop`: Stop all containers.
-- `./site.sh restart`: Restart the environment.
-- `./reset.sh`: **Danger!** Removes all WordPress files, databases, and local configurations to reset the project to its initial state.
+- `./site setup`: Initialize the environment.
+- `./site start`: Start the environment.
+- `./site stop`: Stop all containers.
+- `./site restart`: Restart the environment.
+- `./site reset`: **Danger!** Removes all WordPress files, databases, and local configurations to reset the project.
 
 ## Project Structure
 
@@ -63,16 +64,14 @@ Your site will then be available at: `https://wordpress.local`
 ├── docker-compose.yml     # Docker service definitions
 ├── Dockerfile             # PHP-FPM image definition
 ├── nginx.conf.template    # Nginx configuration template
-├── reset.sh               # Cleanup script
-├── setup.sh               # Initialization script
-├── site.sh                # Environment management script
+├── site                   # Project management script
 ├── wp-config.php          # WordPress configuration
 └── ... (WordPress core files)
 ```
 
 ## Troubleshooting
 
-- **Port Conflicts**: If ports 80 or 443 are already in use, the `site.sh` script will notify you.
+- **Port Conflicts**: If ports 80 or 443 are already in use, the `site` script will notify you.
 - **Permissions**: The setup scripts attempt to handle ownership issues, but ensure you run them as your regular user (not with `sudo`).
 
 ## Technical Summary
