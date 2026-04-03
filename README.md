@@ -96,3 +96,19 @@ To enter the MySQL shell directly:
 ```bash
 docker compose exec mysql mysql -u ${DB_USER} -p${DB_PASSWORD} ${DB_NAME}
 ```
+
+### Database Import/Export
+Use the `./db` script to easily back up or restore your database:
+
+**Export database to SQL file:**
+```bash
+./db export                  # Export to dump.sql (default)
+./db export backup.sql       # Export to backup.sql
+```
+
+**Import database from SQL file:**
+```bash
+./db import backup.sql       # Import from backup.sql (requires confirmation)
+```
+
+The script automatically starts the site if needed and uses credentials from your `.env` file.
