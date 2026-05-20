@@ -17,8 +17,11 @@ services:
   php:
     container_name: ${PROJECT_NAME}_php
     build: .
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./:/var/www/html
+      - ./docker/php/xdebug.ini:/usr/local/etc/php/conf.d/zzz-xdebug.ini:ro
     environment:
       DB_HOST: ${DB_HOST}
       DB_NAME: ${DB_NAME}

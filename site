@@ -29,6 +29,14 @@ if [ "$CURRENT_OWNER" == "root" ]; then
     sudo chown -R $(whoami):$(id -gn) .
 fi
 
+function require_mkcert() {
+    if ! command -v mkcert >/dev/null 2>&1; then
+        echo -e "${RED}Error: mkcert is not installed.${NC}"
+        echo "Install it (e.g. Arch/CachyOS: sudo pacman -S mkcert), then run: mkcert -install"
+        exit 1
+    fi
+}
+
 function check_ports() {
     for port in 80 443; do
         if sudo lsof -Pi :$port -sTCP:LISTEN -t >/dev/null ; then
@@ -40,20 +48,91 @@ function check_ports() {
     done
 }
 
-function setup_certs() {
-    if [ ! -f "$CERTS_DIR/wildcard.pem" ]; then
-        echo -e "${GREEN}Generating wildcard certificates for $DOMAIN and *.local...${NC}"
-        mkdir -p "$CERTS_DIR"
-        mkcert -install
-        mkcert -cert-file "$CERTS_DIR/wildcard.pem" -key-file "$CERTS_DIR/wildcard-key.pem" "$DOMAIN" "*.local"
-    else
-         echo -e "${GREEN}Wildcard certificates already exist.${NC}"
-    fi
+function generate_certs() {
+    require_mkcert
+    echo -e "${GREEN}Generating wildcard certificates for $DOMAIN and *.local...${NC}"
+    mkdir -p "$CERTS_DIR"
+    mkcert -install
+    mkcert -cert-file "$CERTS_DIR/wildcard.pem" -key-file "$CERTS_DIR/wildcard-key.pem" "$DOMAIN" "*.local"
 
     if [ ! -f "$CERTS_DIR/wildcard.pem" ]; then
         echo -e "${RED}Error: Certificates were not generated successfully.${NC}"
         exit 1
     fi
+}
+
+function setup_certs() {
+    if [ ! -f "$CERTS_DIR/wildcard.pem" ]; then
+        generate_certs
+    else
+         echo -e "${GREEN}Wildcard certificates already exist.${NC}"
+    fi
+}
+
+function regenerate_certs() {
+    echo -e "${GREEN}Regenerating SSL certificates for $DOMAIN...${NC}"
+    rm -f "$CERTS_DIR/wildcard.pem" "$CERTS_DIR/wildcard-key.pem"
+    generate_certs
+    echo -e "${GREEN}Certificates written to $CERTS_DIR/${NC}"
+
+    if docker compose ps --status running nginx 2>/dev/null | grep -q nginx; then
+        echo -e "${GREEN}Reloading nginx to use new certificates...${NC}"
+        docker compose restart nginx
+    fi
+}
+
+# Windows profile folder is often NOT the same as WSL $USER.
+function wsl_windows_user_profile() {
+    local winname
+    winname=$(powershell.exe -NoProfile -Command "[Environment]::UserName" 2>/dev/null | tr -d '\r\n')
+    if [[ -n "$winname" && -d "/mnt/c/Users/$winname" ]]; then
+        echo "/mnt/c/Users/$winname"
+        return 0
+    fi
+    return 1
+}
+
+function wsl_try_copy_mkcert_root() {
+    local capath profile dest dir
+    capath="$(mkcert -CAROOT 2>/dev/null)/rootCA.pem"
+    [[ -f "$capath" ]] || return 1
+    profile=$(wsl_windows_user_profile) || return 1
+
+    for dir in "$profile/Desktop" "$profile/Downloads"; do
+        [[ -d "$dir" ]] || continue
+        dest="$dir/wp-start-mkcert-root.crt"
+        if cp "$capath" "$dest" 2>/dev/null; then
+            echo -e "${GREEN}Copied mkcert root CA for Windows trust:${NC} $dest"
+            return 0
+        fi
+    done
+    return 1
+}
+
+function wsl_windows_browser_hint() {
+    if ! grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then
+        return 0
+    fi
+    echo ""
+    echo -e "${GREEN}WSL detected — open the site from a Windows browser:${NC}"
+    echo "  1. Add this line to Windows hosts (Notepad as Administrator):"
+    echo -e "     ${GREEN}127.0.0.1 $DOMAIN${NC}"
+    echo "     File: C:\\Windows\\System32\\drivers\\etc\\hosts"
+    echo "  2. Trust mkcert on Windows (same CA that signed the dev cert):"
+    if wsl_try_copy_mkcert_root; then
+        echo "     Double-click the .crt in Explorer → Install Certificate → Local Machine →"
+    else
+        echo "     Your Linux login name may differ from your Windows profile folder."
+        echo "     In WSL, run (copy/paste as one block):"
+        echo "     win=\$(powershell.exe -NoProfile -Command '[Environment]::UserName' | tr -d '\r\n')"
+        echo "     cp \"\$(mkcert -CAROOT)/rootCA.pem\" \"/mnt/c/Users/\$win/Desktop/wp-start-mkcert-root.crt\""
+        echo "     If Desktop is missing, use .../Downloads/... instead."
+        echo "     On Windows: double-click the .crt → Install Certificate → Local Machine →"
+    fi
+    echo "     Place in \"Trusted Root Certification Authorities\"."
+    echo "     If double-click does nothing: Win+R → certlm.msc → Trusted Root Certification Authorities →"
+    echo "     Certificates → right-click → All Tasks → Import → select the .crt file."
+    echo ""
 }
 
 function setup_hosts() {
@@ -150,6 +229,7 @@ EOF
         setup_certs
         docker compose up -d
         echo -e "${GREEN}Site is available at https://$DOMAIN${NC}"
+        wsl_windows_browser_hint
         ;;
     stop)
         echo -e "${GREEN}Stopping site...${NC}"
@@ -158,6 +238,14 @@ EOF
     restart)
         $0 stop
         $0 start
+        ;;
+    rebuild)
+        echo -e "${GREEN}Rebuilding Docker images...${NC}"
+        docker compose build --no-cache
+        echo -e "${GREEN}Build complete. Use ./site start to launch.${NC}"
+        ;;
+    certs)
+        regenerate_certs
         ;;
     reset)
         echo -e "${RED}Danger: This will remove all WordPress files, database, and local certificates to reset the boilerplate.${NC}"
@@ -200,7 +288,7 @@ EOF
         fi
         ;;
     *)  
-        echo "Usage: $0 {setup|start|stop|restart|reset}"
+        echo "Usage: $0 {setup|start|stop|restart|rebuild|certs|reset}"
         exit 1
         ;;
 esac
