@@ -1,14 +1,6 @@
-# PHP/Composer
+# PHP/Composer (repo root)
 /vendor/
 /composer.lock
-
-# Drupal
-/web/sites/*/settings.php
-/web/sites/*/settings.local.php
-/web/sites/*/services.yml
-/web/sites/*/services.local.yml
-/web/sites/*/files/
-/web/core/
 
 # Docker/Environment
 .env
@@ -22,6 +14,52 @@
 !.vscode/launch.json
 *.swp
 *.bak
+
+# WordPress core (downloaded by ./site setup)
+/wp-admin/
+/wp-includes/
+/index.php
+/license.txt
+/readme.html
+/wp-*.php
+/xmlrpc.php
+
+# WordPress config (generated locally)
+/wp-config.php
+
+# WP-CLI
+/wp-cli.phar
+
+# WordPress content (generated, bundled, or runtime)
+/wp-content/index.php
+/wp-content/languages/
+/wp-content/uploads/
+/wp-content/cache/
+/wp-content/upgrade/
+/wp-content/debug.log
+/wp-content/aiowps_backups/
+/wp-content/themes/twenty*/
+/wp-content/themes/index.php
+/wp-content/plugins/index.php
+/wp-content/plugins/akismet/
+/wp-content/plugins/hello.php
+
+# Theme/plugin dev dependencies
+node_modules/
+wp-content/themes/*/node_modules/
+wp-content/plugins/*/node_modules/
+wp-content/themes/*/vendor/
+wp-content/plugins/*/vendor/
+
+# Logs
+*.log
+
+# htaccess (often modified by WordPress or plugins)
+/.htaccess
+/.user.ini
+
+# Database dumps
+/dump.sql
 
 # AI
 .claude/
