@@ -78,14 +78,78 @@ function export_db() {
 }
 
 # Replace production hostnames with the local dev domain (WP-CLI search-replace).
+function normalize_import_source_host() {
+    local input="$1"
+    input="${input#"${input%%[![:space:]]*}"}"
+    input="${input%"${input##*[![:space:]]}"}"
+    input="${input#http://}"
+    input="${input#https://}"
+    input="${input#//}"
+    input="${input%%/*}"
+    input="${input%%\?*}"
+    input="${input%%#*}"
+    input="${input%.}"
+    printf '%s' "$(echo "$input" | tr '[:upper:]' '[:lower:]')"
+}
+
+function save_import_source_host_to_env() {
+    local host="$1"
+    local env_file="$REPO_ROOT/.env"
+
+    if [[ ! -f "$env_file" ]]; then
+        touch "$env_file"
+    fi
+
+    if grep -q '^IMPORT_SOURCE_HOST=' "$env_file" 2>/dev/null; then
+        grep -v '^IMPORT_SOURCE_HOST=' "$env_file" > "${env_file}.tmp"
+        mv "${env_file}.tmp" "$env_file"
+    fi
+
+    echo "IMPORT_SOURCE_HOST=${host}" >> "$env_file"
+    export IMPORT_SOURCE_HOST="$host"
+}
+
+function prompt_import_source_host() {
+    local default normalized
+
+    default=$(normalize_import_source_host "${IMPORT_SOURCE_HOST:-}")
+    if [[ -n "$default" ]]; then
+        read -p "Import source host [${default}]: " user_input
+        if [[ -z "$user_input" ]]; then
+            normalized="$default"
+        else
+            normalized=$(normalize_import_source_host "$user_input")
+        fi
+    else
+        read -p "Import source host: " user_input
+        normalized=$(normalize_import_source_host "$user_input")
+    fi
+
+    if [[ -z "$normalized" ]]; then
+        echo -e "${RED}Error: import source host is required.${NC}" >&2
+        exit 1
+    fi
+
+    save_import_source_host_to_env "$normalized"
+    echo -e "${GREEN}Saved IMPORT_SOURCE_HOST=${normalized} to .env${NC}"
+}
+
 function search_replace_urls() {
     local auto_yes="${1:-0}"
     local local_host="${PROJECT_NAME}.local"
-    local source_host="${IMPORT_SOURCE_HOST:-production.example.com}"
+    local local_url="https://${local_host}"
+    local source_host
+
+    prompt_import_source_host
+    source_host="$IMPORT_SOURCE_HOST"
 
     echo ""
     echo -e "${YELLOW}URLs in the database may still reference ${source_host}.${NC}"
-    echo -e "Proposed WP-CLI search-replace: ${source_host} → ${local_host} (--all-tables)"
+    echo -e "Proposed WP-CLI search-replace (--all-tables):"
+    echo -e "  https://${source_host} → ${local_url}"
+    echo -e "  http://${source_host} → ${local_url}"
+    echo -e "  //${source_host} → ${local_url}"
+    echo -e "  ${source_host} → ${local_host}"
 
     if [[ "$auto_yes" != "1" ]]; then
         read -p "Run search-replace now? (y/N) " confirm
@@ -97,10 +161,23 @@ function search_replace_urls() {
 
     echo -e "${GREEN}Running search-replace...${NC}"
 
-    if ! "$REPO_ROOT/scripts/wp.sh" --allow-root search-replace "$source_host" "$local_host" --all-tables; then
-        echo -e "${RED}Error: search-replace failed.${NC}"
-        exit 1
-    fi
+    local from to
+    local replacements=(
+        "https://${source_host}|${local_url}"
+        "http://${source_host}|${local_url}"
+        "//${source_host}|${local_url}"
+        "${source_host}|${local_host}"
+    )
+
+    for pair in "${replacements[@]}"; do
+        from="${pair%%|*}"
+        to="${pair#*|}"
+        echo -e "  ${from} → ${to}"
+        if ! "$REPO_ROOT/scripts/wp.sh" --allow-root search-replace "$from" "$to" --all-tables; then
+            echo -e "${RED}Error: search-replace failed for ${from}.${NC}"
+            exit 1
+        fi
+    done
 
     echo -e "${GREEN}Search-replace complete. Current URLs:${NC}"
     "$REPO_ROOT/scripts/wp.sh" --allow-root option get siteurl
@@ -177,8 +254,9 @@ Notes:
   - The site will automatically start if not running
   - Database credentials are loaded from .env file
   - Import requires confirmation before proceeding
-  - After import, offers WP-CLI search-replace (default: production.example.com → PROJECT_NAME.local)
-  - Override source host with IMPORT_SOURCE_HOST in .env if needed
+  - After import, prompts for import source host (pre-filled from IMPORT_SOURCE_HOST in .env)
+  - Strips https://, paths, etc. from the source host and saves it to .env
+  - Replaces https, http, protocol-relative, and bare host variants in the database
 EOF
 }
 

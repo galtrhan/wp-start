@@ -221,7 +221,7 @@ Use the `./db` script to easily back up or restore your database:
 ./db import -y backup.sql    # Import, then search-replace URLs without prompting
 ```
 
-After import, the script offers WP-CLI `search-replace` to swap production URLs for your local domain (default: `production.example.com` → `PROJECT_NAME.local`). Set `IMPORT_SOURCE_HOST` in `.env` to match your production hostname.
+After import, you'll be prompted for the **import source host** (pre-filled from `IMPORT_SOURCE_HOST` in `.env` if set). Enter `https://example.com` or `example.com` — it's normalized to a host and saved to `.env`. Search-replace then updates `https://`, `http://`, `//`, and bare host variants to your local domain.
 
 The script automatically starts the site if needed and uses credentials from your `.env` file.
 
@@ -264,7 +264,7 @@ To replace the offline placeholder image:
 
 ### Typical workflow
 
-1. Import production DB: `./db import dump.sql` (or `./db import -y dump.sql` to auto search-replace)
-2. Set `IMPORT_SOURCE_HOST` in `.env` if the default hostname does not match your dump
+1. Import production DB: `./db import dump.sql` (or `./db import -y dump.sql` to auto-run search-replace)
+2. Enter the live site host when prompted (e.g. `https://example.com` — saved to `IMPORT_SOURCE_HOST` in `.env`)
 3. Set `UPLOADS_FALLBACK=proxy` and `REMOTE_UPLOADS_URL` to staging or production
 4. `./site restart`
