@@ -13,11 +13,13 @@
 # Docker/Environment
 .env
 /certs/
+/placeholder.jpg
 
 # OS/IDE
 .DS_Store
 .idea/
-.vscode/
+.vscode/*
+!.vscode/launch.json
 *.swp
 *.bak
 

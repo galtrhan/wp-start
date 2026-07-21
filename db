@@ -1,5 +1,9 @@
 #!/bin/bash
 
+REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=scripts/docker-env.sh
+source "$REPO_ROOT/scripts/docker-env.sh"
+
 # Database import/export utility script
 # This script manages database operations for the WordPress development environment
 
@@ -59,6 +63,7 @@ function export_db() {
     echo -e "${GREEN}Exporting database to $filename...${NC}"
 
     docker compose exec -T mysql mysqldump \
+        --no-tablespaces \
         -h "$DB_HOST" \
         -u "$DB_USER" \
         -p"$DB_PASSWORD" \
@@ -72,13 +77,44 @@ function export_db() {
     fi
 }
 
+# Replace production hostnames with the local dev domain (WP-CLI search-replace).
+function search_replace_urls() {
+    local auto_yes="${1:-0}"
+    local local_host="${PROJECT_NAME}.local"
+    local source_host="${IMPORT_SOURCE_HOST:-production.example.com}"
+
+    echo ""
+    echo -e "${YELLOW}URLs in the database may still reference ${source_host}.${NC}"
+    echo -e "Proposed WP-CLI search-replace: ${source_host} → ${local_host} (--all-tables)"
+
+    if [[ "$auto_yes" != "1" ]]; then
+        read -p "Run search-replace now? (y/N) " confirm
+        if [[ ! $confirm =~ ^[yY]$ ]]; then
+            echo "Search-replace skipped."
+            return 0
+        fi
+    fi
+
+    echo -e "${GREEN}Running search-replace...${NC}"
+
+    if ! "$REPO_ROOT/scripts/wp.sh" --allow-root search-replace "$source_host" "$local_host" --all-tables; then
+        echo -e "${RED}Error: search-replace failed.${NC}"
+        exit 1
+    fi
+
+    echo -e "${GREEN}Search-replace complete. Current URLs:${NC}"
+    "$REPO_ROOT/scripts/wp.sh" --allow-root option get siteurl
+    "$REPO_ROOT/scripts/wp.sh" --allow-root option get home
+}
+
 # Import database from SQL file
 function import_db() {
     local filename="$1"
+    local auto_search_replace="${2:-0}"
 
     if [ -z "$filename" ]; then
         echo -e "${RED}Error: No SQL file specified.${NC}"
-        echo "Usage: $0 import <filename.sql>"
+        echo "Usage: $0 import [-y] <filename.sql>"
         exit 1
     fi
 
@@ -112,6 +148,8 @@ function import_db() {
         echo -e "${RED}Error: Failed to import database.${NC}"
         exit 1
     fi
+
+    search_replace_urls "$auto_search_replace"
 }
 
 # Show usage
@@ -119,21 +157,28 @@ function show_usage() {
     cat <<EOF
 Database management utility for WordPress development environment
 
-Usage: $0 {export|import} [filename]
+Usage: $0 {export|import} [options] [filename]
 
 Commands:
-  export [filename]     Export database to SQL file (default: dump.sql)
-  import <filename>     Import database from SQL file
+  export [filename]          Export database to SQL file (default: dump.sql)
+  import [-y] <filename>     Import database from SQL file
+
+Options:
+  -y, --yes                  Run URL search-replace after import without prompting
+                             (import itself still requires confirmation)
 
 Examples:
-  $0 export                    # Export to dump.sql
-  $0 export backup.sql         # Export to backup.sql
-  $0 import backup.sql         # Import from backup.sql
+  $0 export                         # Export to dump.sql
+  $0 export backup.sql              # Export to backup.sql
+  $0 import backup.sql              # Import; then prompt for search-replace
+  $0 import -y backup.sql           # Import; then search-replace automatically
 
 Notes:
   - The site will automatically start if not running
   - Database credentials are loaded from .env file
   - Import requires confirmation before proceeding
+  - After import, offers WP-CLI search-replace (default: production.example.com → PROJECT_NAME.local)
+  - Override source host with IMPORT_SOURCE_HOST in .env if needed
 EOF
 }
 
@@ -143,7 +188,34 @@ case "$1" in
         export_db "$2"
         ;;
     import)
-        import_db "$2"
+        shift
+        auto_search_replace=0
+        filename=""
+
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -y|--yes)
+                    auto_search_replace=1
+                    shift
+                    ;;
+                -*)
+                    echo -e "${RED}Error: Unknown option '$1'.${NC}"
+                    show_usage
+                    exit 1
+                    ;;
+                *)
+                    if [ -n "$filename" ]; then
+                        echo -e "${RED}Error: Unexpected argument '$1'.${NC}"
+                        show_usage
+                        exit 1
+                    fi
+                    filename="$1"
+                    shift
+                    ;;
+            esac
+        done
+
+        import_db "$filename" "$auto_search_replace"
         ;;
     *)
         show_usage

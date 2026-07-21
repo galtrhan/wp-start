@@ -1,6 +1,6 @@
 # WordPress Local Development Environment
 
-A Docker-based local development environment for WordPress with Nginx, PHP-FPM, and MySQL.
+A Docker-based local development environment for WordPress with Nginx, PHP-FPM, and MySQL. Suited for **theme and plugin** development.
 
 ## Features
 
@@ -57,7 +57,11 @@ Your site will then be available at: `https://wordpress.local`
 - `./site restart`: Restart the environment.
 - `./site rebuild`: Rebuild Docker images from scratch (no cache).
 - `./site certs`: Regenerate SSL certificates (e.g. after `mkcert -install` or CA change).
+- `./site standard-ports`: One-time sudo sysctl so rootless Docker can bind ports 80/443.
+- `./site refresh-placeholder`: Re-download the offline placeholder JPG (`placeholder` mode).
 - `./site reset`: **Danger!** Removes all WordPress files, databases, and local configurations to reset the project.
+
+Containers use `restart: "no"` — they stay stopped after a host reboot until you run `./site start`.
 
 ## Project Structure
 
@@ -65,8 +69,21 @@ Your site will then be available at: `https://wordpress.local`
 .
 ├── certs/                 # Generated SSL certificates (not in git)
 ├── docker/
+│   ├── nginx/
+│   │   └── uploads-fallback.conf    # Generated Nginx uploads rules (from .env)
 │   └── php/
 │       └── xdebug.ini     # Xdebug 3 configuration
+├── scripts/
+│   ├── docker-env.sh      # Rootless Docker socket detection
+│   ├── php-docker.sh      # Run PHP in the container (IDE validation)
+│   ├── xdebug-status.sh   # Print Xdebug settings from the php container
+│   ├── dev-php.sh         # Run commands in a theme or plugin directory
+│   ├── theme-php.sh       # Theme-only wrapper around dev-php.sh
+│   ├── wp.sh              # WP-CLI inside the php container
+│   ├── install-git-hooks.sh
+│   └── git-hooks/pre-commit  # PHPCS + ESLint on staged theme/plugin files
+├── placeholder-image.php  # Per-path JPG redirects (random_placeholder mode only)
+├── placeholder.jpg        # Downloaded offline placeholder (placeholder mode; gitignored)
 ├── docker-compose.yml     # Docker service definitions
 ├── Dockerfile             # PHP-FPM image definition
 ├── nginx.conf.template    # Nginx configuration template
@@ -91,8 +108,20 @@ PHP includes Xdebug 3 for step debugging. Configuration is in `docker/php/xdebug
 
 1. Build the image (already done by `./site setup` / `./site rebuild`): `docker compose build php`
 2. Start the environment: `./site start`
-3. Configure your IDE to listen for Xdebug connections on port 9003.
+3. Configure your IDE to listen for Xdebug connections on port 9003 (`.vscode/launch.json` is included).
 4. Load the site — breakpoints will be hit.
+
+Check Xdebug inside the running container:
+
+```bash
+./scripts/xdebug-status.sh
+```
+
+For IDE PHP syntax validation against the container PHP version:
+
+```json
+"php.validate.executablePath": "/absolute/path/to/wp-start/scripts/php-docker.sh"
+```
 
 Changes to `docker/php/xdebug.ini` only need a PHP container restart (no rebuild):
 
@@ -101,6 +130,41 @@ docker compose restart php
 ```
 
 To disable Xdebug, comment out `xdebug.mode` in `docker/php/xdebug.ini` and restart PHP.
+
+## Rootless Docker
+
+If you use rootless Docker and ports 80/443 are unavailable, `./site start` automatically falls back to **8080** (HTTP) and **8443** (HTTPS).
+
+To use standard URLs without a port number, run once:
+
+```bash
+./site standard-ports   # needs sudo; persists via sysctl
+./site restart
+```
+
+Or set `NGINX_HTTP_PORT` / `NGINX_HTTPS_PORT` in `.env` to keep custom ports.
+
+`scripts/docker-env.sh` auto-detects the rootless Docker socket when the default `docker` CLI cannot connect.
+
+## Git hooks (PHPCS / ESLint)
+
+After adding a custom **theme or plugin** with PHPCS (`vendor/bin/phpcs`) and ESLint (`node_modules/eslint`):
+
+```bash
+./scripts/install-git-hooks.sh
+```
+
+The pre-commit hook lints staged `.php` and `.js` files (excluding `node_modules/` and `vendor/`) under each dev target. Set `THEME_NAME` and/or `PLUGIN_NAME` in `.env` to pin targets, or leave empty to auto-detect custom themes (`style.css`) and plugins (`{slug}/{slug}.php`) plus any project with `composer.json` / `phpcs.xml`.
+
+Run PHPCS/Composer inside a specific project:
+
+```bash
+./scripts/dev-php.sh -w wp-content/plugins/my-plugin composer install
+./scripts/dev-php.sh -w wp-content/plugins/my-plugin ./vendor/bin/phpcs includes/class-foo.php
+./scripts/theme-php.sh ./vendor/bin/phpcs partials/example.php   # theme shortcut
+```
+
+Requires Docker and `./site start` for PHPCS (runs inside the php container via `dev-php.sh`).
 
 ## Certificates & HTTPS
 
@@ -154,6 +218,53 @@ Use the `./db` script to easily back up or restore your database:
 **Import database from SQL file:**
 ```bash
 ./db import backup.sql       # Import from backup.sql (requires confirmation)
+./db import -y backup.sql    # Import, then search-replace URLs without prompting
 ```
 
+After import, the script offers WP-CLI `search-replace` to swap production URLs for your local domain (default: `production.example.com` → `PROJECT_NAME.local`). Set `IMPORT_SOURCE_HOST` in `.env` to match your production hostname.
+
 The script automatically starts the site if needed and uses credentials from your `.env` file.
+
+## Missing uploads (large production sites)
+
+You do not need to sync all of `wp-content/uploads/` for local development. Import the database and theme/plugins, then choose how Nginx handles missing media files under `/wp-content/uploads/`.
+
+Set these in `.env` (see `.env.template`):
+
+| Variable | Description |
+|----------|-------------|
+| `UPLOADS_FALLBACK` | `off` (default), `proxy`, `placeholder`, or `random_placeholder` |
+| `REMOTE_UPLOADS_URL` | Production/staging origin when using `proxy` (e.g. `https://example.com`, no trailing slash) |
+| `PLACEHOLDER_DOWNLOAD_URL` | JPG URL fetched once for `placeholder` mode (default: Lorem Picsum 1200×800) |
+| `PLACEHOLDER_PHOTO_PROVIDER` | Photo API for `random_placeholder` mode (default: `picsum`) |
+
+### Modes
+
+**`off`** — Serve only files that exist locally. Missing uploads return 404.
+
+**`proxy`** — If a file is not on disk, Nginx fetches it from `REMOTE_UPLOADS_URL`. Best for layout work without downloading tens of GB.
+
+**`placeholder`** — Downloads one JPG to `placeholder.jpg` on first `./site start` (from Lorem Picsum by default). All missing uploads serve that file. **Fully offline** after the initial download.
+
+**`random_placeholder`** — Each missing upload redirects to a unique JPG from Lorem Picsum (stable per path). Requires network in the browser on each new missing file.
+
+After changing these values, restart so Nginx picks up the new config:
+
+```bash
+./site restart
+```
+
+`./site start` regenerates `docker/nginx/uploads-fallback.conf` from `.env` automatically.
+
+To replace the offline placeholder image:
+
+```bash
+./site refresh-placeholder
+```
+
+### Typical workflow
+
+1. Import production DB: `./db import dump.sql` (or `./db import -y dump.sql` to auto search-replace)
+2. Set `IMPORT_SOURCE_HOST` in `.env` if the default hostname does not match your dump
+3. Set `UPLOADS_FALLBACK=proxy` and `REMOTE_UPLOADS_URL` to staging or production
+4. `./site restart`

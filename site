@@ -1,5 +1,9 @@
 #!/bin/bash
 
+REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=scripts/docker-env.sh
+source "$REPO_ROOT/scripts/docker-env.sh"
+
 # Configuration
 if [ -f .env ]; then
     set -a
@@ -13,7 +17,76 @@ CERTS_DIR="./certs"
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
+YELLOW='\033[1;33m'
 NC='\033[0m'
+
+function is_rootless_docker() {
+    docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q 'name=rootless'
+}
+
+function privileged_ports_available() {
+    local start
+    start=$(sysctl -n net.ipv4.ip_unprivileged_port_start 2>/dev/null || echo 1024)
+    [[ "$start" -le 80 ]]
+}
+
+function configure_nginx_ports() {
+    NGINX_HTTP_PORT=${NGINX_HTTP_PORT:-80}
+    NGINX_HTTPS_PORT=${NGINX_HTTPS_PORT:-443}
+
+    if is_rootless_docker && ! privileged_ports_available; then
+        if [[ "$NGINX_HTTP_PORT" -lt 1024 || "$NGINX_HTTPS_PORT" -lt 1024 ]]; then
+            echo -e "${YELLOW}Rootless Docker: using ports 8080 (HTTP) and 8443 (HTTPS).${NC}"
+            echo -e "For the usual ${GREEN}https://${DOMAIN}${NC} URL (no port), run once: ${GREEN}./site standard-ports${NC}"
+            echo "Or set NGINX_HTTP_PORT / NGINX_HTTPS_PORT in .env to keep custom ports."
+            NGINX_HTTP_PORT=8080
+            NGINX_HTTPS_PORT=8443
+        fi
+    fi
+
+    if [[ "$NGINX_HTTPS_PORT" == "443" ]]; then
+        HTTPS_REDIRECT_BASE="https://${DOMAIN}"
+    else
+        HTTPS_REDIRECT_BASE="https://${DOMAIN}:${NGINX_HTTPS_PORT}"
+    fi
+
+    export NGINX_HTTP_PORT NGINX_HTTPS_PORT HTTPS_REDIRECT_BASE
+}
+
+function site_url() {
+    if [[ "$NGINX_HTTPS_PORT" == "443" ]]; then
+        echo "https://$DOMAIN"
+    else
+        echo "https://$DOMAIN:$NGINX_HTTPS_PORT"
+    fi
+}
+
+function enable_standard_ports() {
+    local sysctl_file="/etc/sysctl.d/99-local-dev-unprivileged-ports.conf"
+
+    if privileged_ports_available; then
+        echo -e "${GREEN}Ports 80/443 are already available to rootless Docker.${NC}"
+        echo "Run ${GREEN}./site restart${NC} if containers still use alternate ports."
+        return 0
+    fi
+
+    echo -e "${GREEN}Allowing unprivileged binding of ports 80+ (one-time, needs sudo)...${NC}"
+    echo "Rootless Docker stays enabled; this only relaxes the kernel port floor."
+
+    run_sudo tee "$sysctl_file" > /dev/null <<'EOF'
+# Local dev: allow rootless Docker to bind HTTP/HTTPS (ports >= 80).
+net.ipv4.ip_unprivileged_port_start=80
+EOF
+
+    run_sudo sysctl --system >/dev/null
+
+    if ! privileged_ports_available; then
+        echo -e "${RED}Error: sysctl did not apply. Check ${sysctl_file}${NC}" >&2
+        return 1
+    fi
+
+    echo -e "${GREEN}Standard ports enabled.${NC} Run ${GREEN}./site restart${NC} — site URL will be https://${DOMAIN}"
+}
 
 # Check permissions
 if [ "$EUID" -eq 0 ]; then
@@ -22,11 +95,41 @@ if [ "$EUID" -eq 0 ]; then
     exit 1
 fi
 
+if [[ -z "${SUDO_ASKPASS:-}" && -x "${HOME}/.config/hypr/scripts/sudo_askpass.sh" ]]; then
+    export SUDO_ASKPASS="${HOME}/.config/hypr/scripts/sudo_askpass.sh"
+fi
+
+function run_sudo() {
+    if [[ -n "${SUDO_ASKPASS:-}" && -x "${SUDO_ASKPASS}" ]]; then
+        sudo -A "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+function port_has_listeners() {
+    local port="$1"
+    if [[ "$port" -lt 1024 ]]; then
+        run_sudo lsof -Pi :"$port" -sTCP:LISTEN -t
+    else
+        lsof -Pi :"$port" -sTCP:LISTEN -t
+    fi
+}
+
+function show_port_listeners() {
+    local port="$1"
+    if [[ "$port" -lt 1024 ]]; then
+        run_sudo lsof -i :"$port"
+    else
+        lsof -i :"$port"
+    fi
+}
+
 # Ensure current directory is owned by the current user
 CURRENT_OWNER=$(stat -c '%U' .)
 if [ "$CURRENT_OWNER" == "root" ]; then
     echo -e "${GREEN}Fixing directory ownership...${NC}"
-    sudo chown -R $(whoami):$(id -gn) .
+    run_sudo chown -R $(whoami):$(id -gn) .
 fi
 
 function require_mkcert() {
@@ -38,11 +141,12 @@ function require_mkcert() {
 }
 
 function check_ports() {
-    for port in 80 443; do
-        if sudo lsof -Pi :$port -sTCP:LISTEN -t >/dev/null ; then
+    configure_nginx_ports
+    for port in "$NGINX_HTTP_PORT" "$NGINX_HTTPS_PORT"; do
+        if port_has_listeners "$port" >/dev/null 2>&1; then
             echo -e "${RED}Error: Port $port is already in use.${NC}"
             echo "Please stop any other web servers or containers using this port."
-            sudo lsof -i :$port
+            show_port_listeners "$port"
             exit 1
         fi
     done
@@ -138,10 +242,103 @@ function wsl_windows_browser_hint() {
 function setup_hosts() {
     if ! grep -q "$DOMAIN" /etc/hosts; then
         echo -e "${GREEN}Adding $DOMAIN to /etc/hosts...${NC}"
-        echo "127.0.0.1 $DOMAIN" | sudo tee -a /etc/hosts > /dev/null
+        echo "127.0.0.1 $DOMAIN" | run_sudo tee -a /etc/hosts > /dev/null
     else
         echo -e "${GREEN}$DOMAIN already in /etc/hosts.${NC}"
     fi
+}
+
+function remote_uploads_host() {
+    local url="${1%/}"
+    if [[ ! "$url" =~ ^https?://[^/]+ ]]; then
+        return 1
+    fi
+    echo "${url#*://}" | cut -d/ -f1
+}
+
+function ensure_placeholder_image() {
+    if [[ ! -f "placeholder.jpg" ]]; then
+        echo -e "${GREEN}Downloading offline placeholder image…${NC}"
+        "$REPO_ROOT/scripts/fetch-placeholder.sh"
+    fi
+}
+
+function configure_uploads_fallback() {
+    UPLOADS_FALLBACK=${UPLOADS_FALLBACK:-off}
+    REMOTE_UPLOADS_URL=${REMOTE_UPLOADS_URL:-}
+    local out="docker/nginx/uploads-fallback.conf"
+
+    mkdir -p docker/nginx
+
+    case "$UPLOADS_FALLBACK" in
+        proxy)
+            if [[ -z "$REMOTE_UPLOADS_URL" ]]; then
+                echo -e "${RED}Error: UPLOADS_FALLBACK=proxy requires REMOTE_UPLOADS_URL in .env${NC}"
+                exit 1
+            fi
+            local remote_url="${REMOTE_UPLOADS_URL%/}"
+            local remote_host
+            remote_host=$(remote_uploads_host "$remote_url") || {
+                echo -e "${RED}Error: REMOTE_UPLOADS_URL must be a valid http(s) URL (e.g. https://production.example.com)${NC}"
+                exit 1
+            }
+            cat > "$out" <<EOF
+# Generated by ./site from UPLOADS_FALLBACK=proxy — do not edit manually.
+location ~* ^/wp-content/uploads/ {
+    try_files \$uri @remote_uploads;
+}
+
+location @remote_uploads {
+    proxy_pass ${remote_url};
+    proxy_ssl_server_name on;
+    proxy_set_header Host ${remote_host};
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+}
+EOF
+            echo -e "${GREEN}Uploads fallback: proxy → ${remote_url}${NC}"
+            ;;
+        placeholder)
+            ensure_placeholder_image
+            cat > "$out" <<'EOF'
+# Generated by ./site from UPLOADS_FALLBACK=placeholder — do not edit manually.
+location ~* ^/wp-content/uploads/ {
+    try_files $uri /placeholder.jpg;
+}
+EOF
+            echo -e "${GREEN}Uploads fallback: placeholder (offline JPG at /placeholder.jpg)${NC}"
+            ;;
+        random_placeholder)
+            cat > "$out" <<'EOF'
+# Generated by ./site from UPLOADS_FALLBACK=random_placeholder — do not edit manually.
+location ~* ^/wp-content/uploads/ {
+    try_files $uri @random_placeholder_uploads;
+}
+
+location @random_placeholder_uploads {
+    include fastcgi_params;
+    fastcgi_param SCRIPT_FILENAME $document_root/placeholder-image.php;
+    fastcgi_param QUERY_STRING path=$uri;
+    fastcgi_pass php:9000;
+}
+EOF
+            echo -e "${GREEN}Uploads fallback: random_placeholder (unique JPG per path via picsum.photos)${NC}"
+            ;;
+        off|local|none)
+            cat > "$out" <<EOF
+# Generated by ./site from UPLOADS_FALLBACK=off — do not edit manually.
+location ~* ^/wp-content/uploads/ {
+    try_files \$uri =404;
+}
+EOF
+            echo -e "${GREEN}Uploads fallback: off (local files only)${NC}"
+            ;;
+        *)
+            echo -e "${RED}Error: UPLOADS_FALLBACK must be one of: off, proxy, placeholder, random_placeholder${NC}"
+            exit 1
+            ;;
+    esac
 }
 
 function setup_env() {
@@ -175,12 +372,14 @@ case "$1" in
         echo -e "${GREEN}Building Docker images...${NC}"
         docker compose build
 
+        configure_uploads_fallback
+
         if [ ! -f index.php ]; then
             echo -e "${GREEN}Initializing WordPress project...${NC}"
             docker compose run --rm php sh -c "curl -sO https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar && chmod +x wp-cli.phar && php -d memory_limit=512M ./wp-cli.phar core download --allow-root"
             
             echo -e "${GREEN}Fixing project ownership...${NC}"
-            sudo chown -R $(whoami):$(id -gn) .
+            run_sudo chown -R $(whoami):$(id -gn) .
             
             echo -e "${GREEN}Creating wp-config.php...${NC}"
             cat <<EOF > wp-config.php
@@ -224,11 +423,13 @@ EOF
         fi
 
         echo -e "${GREEN}Starting site...${NC}"
+        configure_nginx_ports
         check_ports
         setup_hosts
         setup_certs
+        configure_uploads_fallback
         docker compose up -d
-        echo -e "${GREEN}Site is available at https://$DOMAIN${NC}"
+        echo -e "${GREEN}Site is available at $(site_url)${NC}"
         wsl_windows_browser_hint
         ;;
     stop)
@@ -247,6 +448,16 @@ EOF
     certs)
         regenerate_certs
         ;;
+    standard-ports)
+        enable_standard_ports
+        ;;
+    refresh-placeholder)
+        "$REPO_ROOT/scripts/fetch-placeholder.sh" --force
+        configure_uploads_fallback
+        if docker compose ps --status running nginx 2>/dev/null | grep -q nginx; then
+            docker compose exec -T nginx nginx -s reload 2>/dev/null || docker compose restart nginx
+        fi
+        ;;
     reset)
         echo -e "${RED}Danger: This will remove all WordPress files, database, and local certificates to reset the boilerplate.${NC}"
         read -p "Are you sure you want to continue? (y/N) " confirm
@@ -256,8 +467,9 @@ EOF
             echo -e "${GREEN}Stopping project containers...${NC}"
             docker compose down -v || true
             
-            for port in 80 443; do
-                if sudo lsof -Pi :$port -sTCP:LISTEN -t >/dev/null ; then
+            configure_nginx_ports
+            for port in "$NGINX_HTTP_PORT" "$NGINX_HTTPS_PORT"; do
+                if port_has_listeners "$port" >/dev/null 2>&1; then
                     echo -e "${RED}Warning: Something is still using port $port.${NC}"
                     read -p "Would you like to stop ALL running docker containers to free up ports? (y/N) " stop_all
                     if [[ $stop_all == [yY] ]]; then
@@ -266,14 +478,14 @@ EOF
                     break
                 fi
             done
-            
+
             if grep -q "$DOMAIN" /etc/hosts; then
                 echo -e "${GREEN}Removing $DOMAIN from /etc/hosts...${NC}"
-                sudo sed -i "/$DOMAIN/d" /etc/hosts
+                run_sudo sed -i "/$DOMAIN/d" /etc/hosts
             fi
 
             echo -e "${GREEN}Removing project files and certificates...${NC}"
-            sudo rm -rf .env certs/ wp-admin/ wp-content/ wp-includes/ wp-config.php index.php license.txt readme.html wp-activate.php wp-blog-header.php wp-comments-post.php wp-cron.php wp-links-opml.php wp-load.php wp-login.php wp-mail.php wp-settings.php wp-signup.php wp-trackback.php xmlrpc.php composer.json composer.lock vendor/ wp-cli.phar wp-config-sample.php
+            run_sudo rm -rf .env certs/ placeholder.jpg wp-admin/ wp-content/ wp-includes/ wp-config.php index.php license.txt readme.html wp-activate.php wp-blog-header.php wp-comments-post.php wp-cron.php wp-links-opml.php wp-load.php wp-login.php wp-mail.php wp-settings.php wp-signup.php wp-trackback.php xmlrpc.php composer.json composer.lock vendor/ wp-cli.phar wp-config-sample.php
             
             echo -e ""
             echo -e "${GREEN}Note: Project-specific certificates have been removed.${NC}"
@@ -288,7 +500,7 @@ EOF
         fi
         ;;
     *)  
-        echo "Usage: $0 {setup|start|stop|restart|rebuild|certs|reset}"
+        echo "Usage: $0 {setup|start|stop|restart|rebuild|certs|standard-ports|refresh-placeholder|reset}"
         exit 1
         ;;
 esac

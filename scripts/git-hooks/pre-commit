@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Lint staged theme/plugin PHP (PHPCS) and JS (ESLint).
+# Linters read the working tree; unstaged edits are stashed with --keep-index so
+# disk matches the staged snapshot.
+set -euo pipefail
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT" || exit 1
+
+# shellcheck source=scripts/docker-env.sh
+source "$REPO_ROOT/scripts/docker-env.sh"
+# shellcheck source=scripts/dev-resolve.sh
+source "$REPO_ROOT/scripts/dev-resolve.sh"
+
+mapfile -t STAGED < <(git diff --cached --name-only --diff-filter=ACMR)
+
+declare -A PHP_FILES_BY_TARGET=()
+declare -A JS_FILES_BY_TARGET=()
+
+for path in "${STAGED[@]}"; do
+    target=$(dev_target_for_path "$REPO_ROOT" "$path" 2>/dev/null) || continue
+
+    if [[ "$path" == "$target"/*.php ]]; then
+        rel="${path#"$target"/}"
+        PHP_FILES_BY_TARGET["$target"]+="${rel} "
+    elif [[ "$path" == "$target"/*.js ]] \
+        && [[ "$path" != *node_modules* ]] \
+        && [[ "$path" != */vendor/* ]]; then
+        rel="${path#"$target"/}"
+        JS_FILES_BY_TARGET["$target"]+="${rel} "
+    fi
+done
+
+run_phpcs() {
+    local target="$1"
+    shift
+    local -a files=("$@")
+    if ! docker info >/dev/null 2>&1; then
+        echo "pre-commit: Docker is not available. Start Docker and try again." >&2
+        return 1
+    fi
+    if ! docker compose exec -T php true >/dev/null 2>&1; then
+        echo "pre-commit: PHP container is not running. Start the stack: ./site start" >&2
+        return 1
+    fi
+    "$REPO_ROOT/scripts/dev-php.sh" -w "$target" ./vendor/bin/phpcs "${files[@]}" || return 1
+}
+
+run_eslint() {
+    local target="$1"
+    shift
+    local -a files=("$@")
+    local abs="$REPO_ROOT/$target"
+    cd "$abs" || return 1
+    if [[ ! -d node_modules/eslint ]]; then
+        echo "pre-commit: run npm install in $target before committing JS." >&2
+        return 1
+    fi
+    npx eslint --max-warnings 0 "${files[@]}" || return 1
+}
+
+STASHED=0
+restore_wip() {
+    if [[ "${STASHED:-0}" -eq 1 ]]; then
+        cd "$REPO_ROOT" || true
+        if ! git stash pop --quiet 2>/dev/null; then
+            echo "pre-commit: git stash pop failed; recover with: git stash list && git stash pop" >&2
+            git stash pop || true
+        fi
+        STASHED=0
+    fi
+}
+trap restore_wip EXIT INT HUP TERM
+
+need_checks=0
+if ((${#PHP_FILES_BY_TARGET[@]})) || ((${#JS_FILES_BY_TARGET[@]})); then
+    need_checks=1
+fi
+
+if [[ "$need_checks" -eq 0 ]]; then
+    exit 0
+fi
+
+if ! git diff --quiet --ignore-submodules -- 2>/dev/null; then
+    if ! git stash push --quiet --keep-index -m "wp-start-pre-commit: unstaged WIP"; then
+        echo "pre-commit: could not stash unstaged changes before linting." >&2
+        exit 1
+    fi
+    STASHED=1
+fi
+
+FAILED=0
+
+for target in "${!PHP_FILES_BY_TARGET[@]}"; do
+    read -ra files <<< "${PHP_FILES_BY_TARGET[$target]}"
+    echo "pre-commit: PHPCS $target (${#files[@]} file(s))…"
+    if ! run_phpcs "$target" "${files[@]}"; then
+        FAILED=1
+    fi
+done
+
+for target in "${!JS_FILES_BY_TARGET[@]}"; do
+    read -ra files <<< "${JS_FILES_BY_TARGET[$target]}"
+    echo "pre-commit: ESLint $target (${#files[@]} file(s))…"
+    if ! run_eslint "$target" "${files[@]}"; then
+        FAILED=1
+    fi
+done
+
+if [[ "$FAILED" -ne 0 ]]; then
+    exit 1
+fi
+
+exit 0
