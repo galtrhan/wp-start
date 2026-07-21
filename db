@@ -77,6 +77,76 @@ function export_db() {
     fi
 }
 
+function mysql_query() {
+    docker compose exec -T mysql mysql -N -h "$DB_HOST" -u "$DB_USER" -p"$DB_PASSWORD" "$DB_NAME" -e "$1" 2>/dev/null
+}
+
+# Detect WordPress table prefix from imported database (e.g. h7QG9_ from h7QG9_posts).
+function detect_table_prefix() {
+    local tables table prefix
+
+    tables=$(mysql_query "SHOW TABLES")
+    if [[ -z "$tables" ]]; then
+        return 1
+    fi
+
+    while IFS= read -r table; do
+        [[ "$table" == *_posts ]] || continue
+        prefix="${table%posts}"
+        if ! echo "$tables" | grep -qx "${prefix}options"; then
+            continue
+        fi
+        if mysql_query "SELECT 1 FROM \`${prefix}options\` WHERE option_name='siteurl' LIMIT 1" | grep -q 1; then
+            printf '%s' "$prefix"
+            return 0
+        fi
+    done <<< "$tables"
+
+    while IFS= read -r table; do
+        [[ "$table" == *_posts ]] || continue
+        prefix="${table%posts}"
+        if echo "$tables" | grep -qx "${prefix}options"; then
+            printf '%s' "$prefix"
+            return 0
+        fi
+    done <<< "$tables"
+
+    return 1
+}
+
+function sync_wp_config_table_prefix() {
+    local prefix="$1"
+    local config="$REPO_ROOT/wp-config.php"
+
+    if [[ ! -f "$config" ]]; then
+        echo -e "${RED}Error: wp-config.php not found. Run ./site setup first.${NC}" >&2
+        return 1
+    fi
+
+    if grep -qE '\$table_prefix\s*=' "$config"; then
+        sed -i "s/\$table_prefix = '[^']*';/\$table_prefix = '${prefix}';/" "$config"
+    else
+        echo -e "${RED}Error: could not find \$table_prefix in wp-config.php.${NC}" >&2
+        return 1
+    fi
+}
+
+function sync_table_prefix_after_import() {
+    local prefix
+
+    if ! prefix=$(detect_table_prefix); then
+        echo -e "${YELLOW}Warning: could not detect WordPress table prefix; WP-CLI may fail.${NC}"
+        echo -e "${YELLOW}Set \$table_prefix in wp-config.php to match the imported database.${NC}"
+        return 1
+    fi
+
+    if ! sync_wp_config_table_prefix "$prefix"; then
+        return 1
+    fi
+
+    echo -e "${GREEN}Updated wp-config.php table prefix to '${prefix}'${NC}"
+}
+
 # Replace production hostnames with the local dev domain (WP-CLI search-replace).
 function normalize_import_source_host() {
     local input="$1"
@@ -226,6 +296,8 @@ function import_db() {
         exit 1
     fi
 
+    sync_table_prefix_after_import
+
     search_replace_urls "$auto_search_replace"
 }
 
@@ -234,11 +306,13 @@ function show_usage() {
     cat <<EOF
 Database management utility for WordPress development environment
 
-Usage: $0 {export|import} [options] [filename]
+Usage: $0 {export|import|sync-prefix|search-replace} [options] [filename]
 
 Commands:
   export [filename]          Export database to SQL file (default: dump.sql)
   import [-y] <filename>     Import database from SQL file
+  sync-prefix                Detect table prefix from DB and update wp-config.php
+  search-replace [-y]        Run URL search-replace using saved import source host
 
 Options:
   -y, --yes                  Run URL search-replace after import without prompting
@@ -254,7 +328,8 @@ Notes:
   - The site will automatically start if not running
   - Database credentials are loaded from .env file
   - Import requires confirmation before proceeding
-  - After import, prompts for import source host (pre-filled from IMPORT_SOURCE_HOST in .env)
+  - After import, detects the WordPress table prefix and updates wp-config.php
+  - Prompts for import source host (pre-filled from IMPORT_SOURCE_HOST in .env)
   - Strips https://, paths, etc. from the source host and saves it to .env
   - Replaces https, http, protocol-relative, and bare host variants in the database
 EOF
@@ -264,6 +339,23 @@ EOF
 case "$1" in
     export)
         export_db "$2"
+        ;;
+    sync-prefix)
+        ensure_site_running || exit 1
+        sync_table_prefix_after_import
+        ;;
+    search-replace)
+        shift
+        auto_yes=0
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -y|--yes) auto_yes=1; shift ;;
+                *) show_usage; exit 1 ;;
+            esac
+        done
+        ensure_site_running || exit 1
+        sync_table_prefix_after_import || true
+        search_replace_urls "$auto_yes"
         ;;
     import)
         shift

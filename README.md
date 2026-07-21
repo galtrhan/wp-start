@@ -221,7 +221,7 @@ Use the `./db` script to easily back up or restore your database:
 ./db import -y backup.sql    # Import, then search-replace URLs without prompting
 ```
 
-After import, you'll be prompted for the **import source host** (pre-filled from `IMPORT_SOURCE_HOST` in `.env` if set). Enter `https://example.com` or `example.com` — it's normalized to a host and saved to `.env`. Search-replace then updates `https://`, `http://`, `//`, and bare host variants to your local domain.
+After import, the script **auto-detects the WordPress table prefix** from the database and updates `wp-config.php` (so WP-CLI works with non-`wp_` dumps). You'll then be prompted for the **import source host** (pre-filled from `IMPORT_SOURCE_HOST` in `.env` if set). Enter `https://example.com` or `example.com` — it's normalized to a host and saved to `.env`. Search-replace then updates `https://`, `http://`, `//`, and bare host variants to your local domain.
 
 The script automatically starts the site if needed and uses credentials from your `.env` file.
 
